@@ -1,0 +1,16 @@
+plugins {
+    id 'com.android.application' version '8.5.2' apply false
+    id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
+    id 'com.chaquo.python' version '17.0.0' apply false
+}
+
+// pluginManagement (dans settings.gradle) donne a Gradle ou trouver les
+// PLUGINS ci-dessus. Ce bloc-ci lui donne separement ou trouver les
+// DEPENDANCES de chaque module (ici : Kotlin, AppCompat...) -- sans lui,
+// la resolution echoue avec "no repositories are defined".
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}

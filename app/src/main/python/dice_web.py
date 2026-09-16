@@ -393,6 +393,23 @@ BASE_CSS = """
     padding:10px 14px; margin-top:12px; font-weight:800; text-align:center;
     box-shadow:3px 3px 0 var(--ink); color:var(--ink);
   }
+  .ai-feed-window{
+    background:#fff; color:var(--ink); border:3px solid var(--ink); border-radius:10px;
+    padding:10px 12px; box-shadow:3px 3px 0 var(--ink);
+    max-height:12em; overflow-y:auto; line-height:1.5em;
+  }
+  .ai-feed-entry{
+    text-align:left; font-weight:600; padding:6px 0;
+    border-bottom:1px solid var(--line);
+  }
+  .ai-feed-entry:last-child{border-bottom:none;}
+  .ai-feed-hint{
+    color:var(--ink); opacity:0.65; font-size:0.88rem; text-align:center; margin:4px 0;
+  }
+  .ai-pending-roll{
+    background:var(--yellow); border:2px solid var(--ink); border-radius:8px;
+    padding:8px 10px; margin-top:10px; font-weight:700; font-size:0.85rem; color:var(--ink);
+  }
   label{
     font-size:0.85rem; font-weight:700; color:#fff; opacity:0.9;
     text-shadow:1px 1px 3px rgba(0,0,0,0.7); display:block;
@@ -929,7 +946,6 @@ def roll_animation_script():
       }}
     }}
     function submitRoll(kind, btns){{
-      showAiWritingIndicator();
       fetch('/roll', {{
         method: 'POST',
         headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
@@ -955,11 +971,13 @@ def roll_animation_script():
       applyExtras(data);
     }}
     function useTotemEnergy(key){{
+      var el = document.getElementById('aiFreeMessageInput');
+      var text = el ? el.value.trim() : '';
       showAiWritingIndicator();
       fetch('/use_totem_energy', {{
         method: 'POST',
         headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
-        body: new URLSearchParams({{key: key}}).toString()
+        body: new URLSearchParams({{key: key, text: text}}).toString()
       }})
         .then(function(r){{ return r.json(); }})
         .then(function(data){{
@@ -973,6 +991,7 @@ def roll_animation_script():
           if (nEl && typeof data.narrator_note === 'string') {{ nEl.outerHTML = data.narrator_note; }}
           var aiEl = document.getElementById('aiStoryPanel');
           if (aiEl && typeof data.ai_story === 'string') {{ aiEl.outerHTML = data.ai_story; }}
+          if (data.spent && el) {{ el.value = ''; }}
         }});
     }}
     function applyGaugeAndPicker(data){{
@@ -1107,7 +1126,9 @@ def roll_animation_script():
     function sendAiMessage(){{
       var el = document.getElementById('aiFreeMessageInput');
       var text = el ? el.value.trim() : '';
-      if (!text) {{ return; }}
+      // Pas de garde sur "text vide" ici : un lancer en attente peut a lui
+      // seul justifier l'envoi, meme sans texte tape en plus. Le serveur
+      // ne fait de toute facon rien s'il n'y a ni lancer en attente ni texte.
       showAiWritingIndicator();
       refreshAiPanel('/send_ai_message', {{text: text}});
       if (el) {{ el.value = ''; }}
@@ -1454,18 +1475,19 @@ def render_ai_panel_html(transient_error=None):
 
     rows = []
     for msg in session.ai_conversation:
-        if msg["role"] == "user":
+        if msg["role"] == "assistant":
             rows.append(
-                '<div class="sub" style="margin:10px 0 2px 0; font-size:0.82rem;">'
-                f'&#127922; {msg["content"].replace(chr(10), "<br>")}</div>'
-            )
-        elif msg["role"] == "assistant":
-            rows.append(
-                '<div class="result-text" style="text-align:left; margin-top:2px;">'
+                '<div class="ai-feed-entry">'
                 f'{msg["content"].replace(chr(10), "<br>")}</div>'
             )
+        # Les messages "user" (tes propres messages/evenements envoyes a
+        # l'IA) ne sont plus affiches dans le flux -- tu les connais deja
+        # puisque c'est toi qui les as ecrits/declenches, et les melanger
+        # avec la reponse rendait la lecture confuse. Ils restent bien
+        # sur envoyes a l'IA (session.ai_conversation les garde tous)
+        # pour qu'elle garde le contexte complet de la conversation.
     feed = "".join(rows) if rows else (
-        '<p class="sub">(rien pour l\'instant -- lance un de, utilise le bouton '
+        '<p class="ai-feed-hint">(rien pour l\'instant -- lance un de, utilise le bouton '
         '"Envoyer le prompt a l\'IA" plus bas, ou ecris un message ci-dessous '
         'pour planter le decor et demarrer l\'aventure)</p>'
     )
@@ -1474,12 +1496,22 @@ def render_ai_panel_html(transient_error=None):
         f'&#9888;&#65039; {transient_error}</div>'
         if transient_error else ""
     )
+    pending = session.pending_roll()
+    pending_html = ""
+    if pending:
+        pending_html = (
+            '<div class="ai-pending-roll">'
+            '&#127922; En attente d\'envoi : '
+            f'{ai_event_text(pending).replace(chr(10), " -- ")}'
+            '</div>'
+        )
     return (
         '<div id="aiStoryPanel">'
         '<div class="sub" style="margin-bottom:8px;">'
         '&#9989; Narration automatique active (Mistral)</div>'
         + error_html
-        + f'<div id="aiStoryFeed" style="max-height:340px; overflow-y:auto;">{feed}</div>'
+        + f'<div id="aiStoryFeed" class="ai-feed-window">{feed}</div>'
+        + pending_html
         + '<label style="margin-top:12px;">Message libre a l\'IA (demarrer l\'aventure, '
         + 'decrire une action de Gabin...)</label>'
         + '<textarea id="aiFreeMessageInput" placeholder="Ex: Commence l\'aventure : '
@@ -2982,20 +3014,42 @@ def reset_story_to_origin():
 def do_send_full_prompt():
     """Bouton "Envoyer le prompt a l'IA" : transmet mecaniques + histoire
     deja vecue, avec une instruction de demarrer/poursuivre le chapitre.
-    Permet d'amorcer la conversation automatique sans attendre un lancer."""
+    Permet d'amorcer la conversation automatique sans attendre un lancer.
+
+    Renvoie le HTML brut du panneau (comme do_clear_mistral_key), PAS du
+    JSON : le JS cote client (refreshAiPanel) fait un simple r.text() et
+    remplace directement le outerHTML avec la reponse -- un jsonify(...)
+    ici serait mal interprete (le JSON brut, accolades comprises, serait
+    injecte tel quel comme HTML) et causerait en plus un double-encodage
+    des caracteres unicode (emojis affiches sous forme d'echappement
+    litteral \\uXXXX au lieu du caractere reel)."""
     _, ai_error = run_ai_narrator(build_ai_kickoff_message())
-    return jsonify({"ai_story": render_ai_panel_html(ai_error)})
+    return render_ai_panel_html(ai_error)
 
 
 @app.route("/send_ai_message", methods=["POST"])
 def do_send_ai_message():
-    """Message libre envoye a l'IA a tout moment (demarrer l'aventure,
-    decrire une action de Gabin entre deux lancers...)."""
+    """Envoi groupe a l'IA : le texte libre tape par le joueur, precede
+    du dernier lancer de des s'il n'a pas deja ete envoye (voir
+    session.pending_roll() / mark_last_roll_as_sent()). Le texte seul,
+    le lancer seul, ou les deux ensemble sont tous des cas valides -- si
+    aucun des deux n'existe, ne fait rien (comme avant)."""
     text = (request.form.get("text") or "").strip()
-    ai_error = None
+    pending = session.pending_roll()
+
+    parts = []
+    if pending:
+        parts.append(ai_event_text(pending))
     if text:
-        _, ai_error = run_ai_narrator(text)
-    return jsonify({"ai_story": render_ai_panel_html(ai_error)})
+        parts.append(text)
+    combined = "\n".join(parts)
+
+    ai_error = None
+    if combined:
+        _, ai_error = run_ai_narrator(combined)
+        if pending:
+            session.mark_last_roll_as_sent()
+    return render_ai_panel_html(ai_error)
 
 
 @app.route("/roll", methods=["POST"])
@@ -3009,7 +3063,10 @@ def do_roll():
     elif action == "both":
         record = session.roll_both("")
 
-    _, ai_error = run_ai_narrator(ai_event_text(record))
+    # Le lancer n'est PLUS envoye tout seul et automatiquement a l'IA ici
+    # (voir do_send_ai_message ci-dessous) : il reste "en attente"
+    # (session.pending_roll()) jusqu'a ce que tu appuies sur "Envoyer a
+    # l'IA", pour pouvoir y ajouter ton propre texte avant l'envoi.
 
     return jsonify({
         "dice": render_dice_result_html(),
@@ -3018,7 +3075,7 @@ def do_roll():
         "threat": render_threat_gauge_html(),
         "quests": render_side_quests_html(),
         "narrator_note": render_narrator_note_html(narrator_note_for_record(record)),
-        "ai_story": render_ai_panel_html(ai_error),
+        "ai_story": render_ai_panel_html(),
     })
 
 
@@ -3080,7 +3137,17 @@ def do_use_totem_energy():
                     effect_text = f"{info['label']} intervient pour aider !"
     ai_error = None
     if spent and effect_text:
-        _, ai_error = run_ai_narrator(effect_text)
+        pending = session.pending_roll()
+        text = (request.form.get("text") or "").strip()
+        parts = []
+        if pending:
+            parts.append(ai_event_text(pending))
+        if text:
+            parts.append(text)
+        parts.append(effect_text)
+        _, ai_error = run_ai_narrator("\n".join(parts))
+        if pending:
+            session.mark_last_roll_as_sent()
     return jsonify({
         "spent": spent,
         "effect": effect_text,

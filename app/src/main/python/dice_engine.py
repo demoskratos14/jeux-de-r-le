@@ -158,6 +158,15 @@ class DiceSession:
         # (voir ai_messages_to_send) pour ne pas depasser son contexte.
         self.ai_conversation = []
 
+        # Id du dernier lancer (self.history) deja transmis a l'IA
+        # narratrice, pour le flux "roll -> texte -> envoi groupe" (voir
+        # dice_web.py, do_roll / do_send_ai_message) : rouler un de ne
+        # declenche plus d'appel a l'IA tout seul, seulement quand on
+        # appuie sur "Envoyer a l'IA" -- ce compteur permet de savoir si
+        # le dernier lancer a deja ete inclus dans un envoi ou non, pour
+        # ne jamais l'envoyer deux fois.
+        self.last_ai_sent_id = 0
+
     # ---------- persistance ----------
     def save(self):
         data = {"history": self.history, "next_id": self.next_id,
@@ -171,6 +180,7 @@ class DiceSession:
                  "next_quest_id": self.next_quest_id,
                  "story_log": self.story_log,
                  "ai_conversation": self.ai_conversation,
+                 "last_ai_sent_id": self.last_ai_sent_id,
                  "custom_totems": self.custom_totems}
         with open(SAVE_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -237,6 +247,10 @@ class DiceSession:
                 if isinstance(m, dict) and m.get("role") in ("system", "user", "assistant")
                 and isinstance(m.get("content"), str) and m.get("content").strip()
             ]
+            try:
+                self.last_ai_sent_id = int(data.get("last_ai_sent_id", 0))
+            except (TypeError, ValueError):
+                self.last_ai_sent_id = 0
             return True
         return False
 
@@ -486,7 +500,26 @@ class DiceSession:
         pas touche. Utile si la conversation devient tres longue ou part
         dans une mauvaise direction."""
         self.ai_conversation = []
+        self.last_ai_sent_id = 0
         self.save()
+
+    def mark_last_roll_as_sent(self):
+        """A appeler juste apres avoir transmis le dernier lancer a l'IA
+        (voir dice_web.py do_send_ai_message) pour ne pas le renvoyer une
+        deuxieme fois au prochain message."""
+        if self.history:
+            self.last_ai_sent_id = self.history[-1]["id"]
+            self.save()
+
+    def pending_roll(self):
+        """Le dernier lancer effectue s'il n'a pas encore ete transmis a
+        l'IA narratrice, sinon None."""
+        if not self.history:
+            return None
+        last = self.history[-1]
+        if last["id"] <= self.last_ai_sent_id:
+            return None
+        return last
 
     def ai_messages_to_send(self):
         """Messages a effectivement transmettre a l'API : le message

@@ -8,6 +8,12 @@ android {
     namespace 'com.aventure.desdice'
     compileSdk 34
 
+    // Nom de base du fichier APK genere (au lieu de "app") -- Gradle
+    // ajoute encore le suffixe du type de build, donc le fichier final
+    // s'appelle "jeux-de-role-debug.apk" (voir build-apk.yml, qui pointe
+    // vers ce chemin exact).
+    archivesBaseName = "jeux-de-role"
+
     defaultConfig {
         applicationId "com.aventure.desdice.auto"
         minSdk 24

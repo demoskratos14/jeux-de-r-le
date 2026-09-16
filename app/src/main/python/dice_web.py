@@ -2006,13 +2006,110 @@ def _render_classic_die(value):
     si aucune n'est active -- cette page est volontairement independante
     des histoires."""
     if value is None:
-        return '<div class="classic-die"></div>'
+        return '<div class="classic-die" id="classic-success-die"></div>'
     positions = PIP_POSITIONS[value]
     dots = "".join(
         f'<div class="classic-pip" style="grid-row:{r}; grid-column:{c};"></div>'
         for (r, c) in positions
     )
-    return f'<div class="classic-die">{dots}</div>'
+    return f'<div class="classic-die" id="classic-success-die">{dots}</div>'
+
+
+def render_classic_history_html(history):
+    """Rendu de la liste d'historique des des classiques -- factorise pour
+    etre reutilise a la fois au premier affichage de la page et apres
+    chaque lancer (reponse JSON de do_classic_dice_roll)."""
+    if history:
+        rows = []
+        for entry in reversed(history):
+            bits = []
+            if entry.get("success") is not None:
+                bits.append(f"D\u00e9 classique={entry['success']}")
+            if entry.get("fate") is not None:
+                face = FATE_BY_KEY[entry["fate"]]
+                bits.append(f"Destin={face['emoji']} {face['label']}")
+            if bits:
+                rows.append(f'<div class="classic-history-item">#{entry["id"]} &mdash; ' + " | ".join(bits) + '</div>')
+        return "".join(rows) if rows else '<p class="classic-hint">(aucun lancer pour l\'instant)</p>'
+    return '<p class="classic-hint">(aucun lancer pour l\'instant)</p>'
+
+
+def classic_dice_animation_script():
+    """Script d'animation pour la page "Des classiques" : meme principe
+    que roll_animation_script() plus haut dans le fichier (defilement
+    rapide de faces aleatoires qui ralentit avant de s'arreter, comme un
+    vrai roulement), mais independant du systeme de symboles/totems --
+    cette page n'a ni histoire ni totem. Une fois l'animation terminee,
+    le vrai lancer est effectue cote serveur (/classic_dice/roll) et son
+    resultat remplace la derniere frame aleatoire."""
+    return f"""
+    <script>
+    const CLASSIC_PIP_POSITIONS_JS = {PIP_POSITIONS_JSON};
+    const CLASSIC_FATE_FACES_JS = {FATE_FACES_JSON};
+
+    function renderClassicSuccessFrame(value){{
+      var positions = CLASSIC_PIP_POSITIONS_JS[String(value)];
+      return positions.map(function(pos){{
+        return '<div class="classic-pip" style="grid-row:'+pos[0]+'; grid-column:'+pos[1]+';"></div>';
+      }}).join('');
+    }}
+    function renderClassicFateFrame(face){{
+      return '<div class="fate-emoji">'+face.emoji+'</div><div class="fate-label">'+face.label+'</div>';
+    }}
+    function animateClassicDie(elementId, kind, callback){{
+      var el = document.getElementById(elementId);
+      if (!el) {{ callback(); return; }}
+      var steps = 0, maxSteps = 14, delay = 55;
+      function tick(){{
+        if (kind === 'success'){{
+          var v = 1 + Math.floor(Math.random()*6);
+          el.innerHTML = renderClassicSuccessFrame(v);
+        }} else {{
+          var f = CLASSIC_FATE_FACES_JS[Math.floor(Math.random()*CLASSIC_FATE_FACES_JS.length)];
+          el.innerHTML = renderClassicFateFrame(f);
+        }}
+        steps++;
+        delay = delay * 1.22;
+        if (steps < maxSteps){{
+          setTimeout(tick, delay);
+        }} else {{
+          callback();
+        }}
+      }}
+      tick();
+    }}
+    function startClassicRoll(kind){{
+      var btns = document.querySelectorAll('.classic-roll-btn');
+      btns.forEach(function(b){{ b.disabled = true; }});
+      var pending = 0;
+      function finish(){{
+        pending--;
+        if (pending <= 0){{ submitClassicRoll(kind, btns); }}
+      }}
+      if (kind === 'success' || kind === 'both'){{ pending++; animateClassicDie('classic-success-die', 'success', finish); }}
+      if (kind === 'fate' || kind === 'both'){{ pending++; animateClassicDie('fate-die-box', 'fate', finish); }}
+    }}
+    function submitClassicRoll(kind, btns){{
+      fetch('{url_for("do_classic_dice_roll")}', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
+        body: new URLSearchParams({{kind: kind}}).toString()
+      }})
+        .then(function(r){{ return r.json(); }})
+        .then(function(data){{
+          var sEl = document.getElementById('classic-success-die');
+          if (sEl && data.success_die) {{ sEl.outerHTML = data.success_die; }}
+          var fEl = document.getElementById('fate-die-box');
+          if (fEl && data.fate_die) {{ fEl.outerHTML = data.fate_die; }}
+          var hEl = document.getElementById('classicHistory');
+          if (hEl && typeof data.history === 'string') {{ hEl.innerHTML = data.history; }}
+        }})
+        .finally(function(){{
+          btns.forEach(function(b){{ b.disabled = false; }});
+        }});
+    }}
+    </script>
+    """
 
 
 def render_classic_dice_page():
@@ -2038,20 +2135,7 @@ def render_classic_dice_page():
         f'</div>'
     )
 
-    if history:
-        rows = []
-        for entry in reversed(history):
-            bits = []
-            if entry.get("success") is not None:
-                bits.append(f"D\u00e9 classique={entry['success']}")
-            if entry.get("fate") is not None:
-                face = FATE_BY_KEY[entry["fate"]]
-                bits.append(f"Destin={face['emoji']} {face['label']}")
-            if bits:
-                rows.append(f'<div class="classic-history-item">#{entry["id"]} &mdash; ' + " | ".join(bits) + '</div>')
-        history_html = "".join(rows) if rows else '<p class="classic-hint">(aucun lancer pour l\'instant)</p>'
-    else:
-        history_html = '<p class="classic-hint">(aucun lancer pour l\'instant)</p>'
+    history_html = render_classic_history_html(history)
 
     return render_template_string(f"""
     <!DOCTYPE html><html lang="fr"><head>
@@ -2089,13 +2173,16 @@ def render_classic_dice_page():
         max-width:480px; margin:0 auto 16px auto;
       }}
       .classic-dice-row{{display:flex; justify-content:center; gap:16px; margin-bottom:6px; flex-wrap:wrap;}}
+      /* Meme gabarit que .die-box (de du destin) pour que les deux des
+         paraissent de la meme paire, plutot que deux tailles differentes. */
       .classic-die{{
-        width:88px; height:88px; background:#fff; border:3px solid var(--ink);
+        width:150px; height:150px; background:#fff; border:4px solid var(--ink);
         border-radius:14px; display:grid; grid-template-columns:repeat(3,1fr);
-        grid-template-rows:repeat(3,1fr); padding:10px; box-shadow:2px 2px 0 rgba(0,0,0,0.25);
+        grid-template-rows:repeat(3,1fr); padding:10px; box-shadow:5px 5px 0 var(--ink);
+        transform:rotate(-1deg); overflow:hidden;
       }}
       .classic-pip{{
-        width:14px; height:14px; border-radius:50%; background:var(--ink);
+        width:22px; height:22px; border-radius:50%; background:var(--ink);
         justify-self:center; align-self:center;
       }}
       .classic-die-caption{{
@@ -2149,31 +2236,23 @@ def render_classic_dice_page():
 
         <div class="card">
           <div class="classic-dice-row">{dice_html}</div>
-          <form method="post" action="{url_for('do_classic_dice_roll')}">
-            <input type="hidden" name="kind" value="both">
-            <button type="submit" class="btn">&#9889; Lancer les deux d&eacute;s</button>
-          </form>
+          <button type="button" class="btn classic-roll-btn" onclick="startClassicRoll('both')">&#9889; Lancer les deux d&eacute;s</button>
           <div style="display:flex; gap:10px;">
-            <form method="post" action="{url_for('do_classic_dice_roll')}" style="flex:1;">
-              <input type="hidden" name="kind" value="success">
-              <button type="submit" class="btn secondary">D&eacute; classique</button>
-            </form>
-            <form method="post" action="{url_for('do_classic_dice_roll')}" style="flex:1;">
-              <input type="hidden" name="kind" value="fate">
-              <button type="submit" class="btn secondary">D&eacute; du destin</button>
-            </form>
+            <button type="button" class="btn secondary classic-roll-btn" style="flex:1;" onclick="startClassicRoll('success')">D&eacute; classique</button>
+            <button type="button" class="btn secondary classic-roll-btn" style="flex:1;" onclick="startClassicRoll('fate')">D&eacute; du destin</button>
           </div>
         </div>
 
         <div class="card">
           <div style="font-weight:800; margin-bottom:8px;">Historique</div>
-          <div class="classic-history">{history_html}</div>
+          <div class="classic-history" id="classicHistory">{history_html}</div>
           <form method="post" action="{url_for('do_classic_dice_clear')}"
                 onsubmit="return confirm('Effacer tout l\\'historique des des classiques ?');">
             <button type="submit" class="btn danger">Effacer l'historique</button>
           </form>
         </div>
       </div>
+      {classic_dice_animation_script()}
     </body></html>
     """)
 
@@ -2189,7 +2268,14 @@ def do_classic_dice_roll():
     if kind not in ("success", "fate", "both"):
         kind = "both"
     roll_classic_dice(kind)
-    return redirect(url_for("classic_dice_page"))
+    state = load_classic_dice_state()
+    history = state["history"]
+    last_success, last_fate = _last_classic_dice_values(history)
+    return jsonify({
+        "success_die": _render_classic_die(last_success),
+        "fate_die": render_fate_die(last_fate, used=True),
+        "history": render_classic_history_html(history),
+    })
 
 
 @app.route("/classic_dice/clear", methods=["POST"])

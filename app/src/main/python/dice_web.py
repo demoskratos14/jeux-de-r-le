@@ -2062,7 +2062,9 @@ def _render_classic_die(value):
     si aucune n'est active -- cette page est volontairement independante
     des histoires."""
     if value is None:
-        return '<div class="classic-die" id="classic-success-die"></div>'
+        return ('<div class="classic-die" id="classic-success-die">'
+                 '<div class="classic-die-placeholder">&#9889;</div>'
+                 '</div>')
     positions = PIP_POSITIONS[value]
     dots = "".join(
         f'<div class="classic-pip" style="grid-row:{r}; grid-column:{c};"></div>'
@@ -2240,6 +2242,11 @@ def render_classic_dice_page():
       .classic-pip{{
         width:22px; height:22px; border-radius:50%; background:var(--ink);
         justify-self:center; align-self:center;
+      }}
+      .classic-die-placeholder{{
+        grid-column:1 / -1; grid-row:1 / -1;
+        display:flex; align-items:center; justify-content:center;
+        font-size:3.4rem; color:var(--ink); opacity:0.55;
       }}
       .classic-die-caption{{
         font-family:'Bangers',cursive; font-size:0.85rem; margin-top:6px; color:var(--ink); opacity:0.85;

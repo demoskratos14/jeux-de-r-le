@@ -2364,7 +2364,7 @@ def render_story_selector_page():
       <div class="page-header">
         <h1>&#127775; Choisis ton histoire</h1>
         <a href="{url_for('classic_dice_page')}" style="pointer-events:auto; position:absolute; top:14px; left:16px; width:34px; height:34px; display:flex; align-items:center; justify-content:center;">
-          <img src="data:image/png;base64,{CLASSIC_DICE_ICON_B64}" alt="Des classiques" style="width:100%; height:100%; object-fit:contain; filter:drop-shadow(0 2px 6px rgba(0,0,0,0.7));">
+          <img src="data:image/png;base64,{CLASSIC_DICE_ICON_B64}" alt="Des classiques" style="width:100%; height:100%; object-fit:contain; filter:brightness(0) invert(1) drop-shadow(0 1px 3px rgba(0,0,0,0.4)); mix-blend-mode:difference;">
         </a>
         <a href="{url_for('configure_key_page')}" style="pointer-events:auto; position:absolute; top:18px; right:16px; color:#fff; opacity:0.85; text-decoration:none; font-size:1.3rem; text-shadow:0 2px 6px rgba(0,0,0,0.7);">&#128273;</a>
       </div>

@@ -158,6 +158,17 @@ class DiceSession:
         # (voir ai_messages_to_send) pour ne pas depasser son contexte.
         self.ai_conversation = []
 
+        # Resume compact de tout ce qui est sorti de la fenetre recente
+        # (AI_HISTORY_WINDOW) ci-dessus -- reinjecte a chaque appel pour
+        # que l'IA garde la memoire des evenements/personnages/objets
+        # anciens meme sur une tres longue partie, sans renvoyer tout le
+        # texte brut (voir dice_web.py: maybe_update_story_summary()).
+        self.story_summary = ""
+        # Nombre de messages de la conversation (hors message system,
+        # voir _rest_conversation) deja integres dans story_summary --
+        # permet de savoir lesquels restent "en attente" de resume.
+        self.last_summarized_index = 0
+
         # Id du dernier lancer (self.history) deja transmis a l'IA
         # narratrice, pour le flux "roll -> texte -> envoi groupe" (voir
         # dice_web.py, do_roll / do_send_ai_message) : rouler un de ne
@@ -180,6 +191,8 @@ class DiceSession:
                  "next_quest_id": self.next_quest_id,
                  "story_log": self.story_log,
                  "ai_conversation": self.ai_conversation,
+                 "story_summary": self.story_summary,
+                 "last_summarized_index": self.last_summarized_index,
                  "last_ai_sent_id": self.last_ai_sent_id,
                  "custom_totems": self.custom_totems}
         with open(SAVE_FILE, "w", encoding="utf-8") as f:
@@ -247,6 +260,19 @@ class DiceSession:
                 if isinstance(m, dict) and m.get("role") in ("system", "user", "assistant")
                 and isinstance(m.get("content"), str) and m.get("content").strip()
             ]
+            summary = data.get("story_summary")
+            self.story_summary = summary.strip() if isinstance(summary, str) else ""
+            try:
+                # borne a la taille reelle de la conversation chargee : une
+                # sauvegarde plus ancienne (avant l'ajout de ce champ) ou
+                # corrompue ne doit jamais produire un index hors bornes.
+                idx = int(data.get("last_summarized_index", 0))
+            except (TypeError, ValueError):
+                idx = 0
+            rest_len = len(self.ai_conversation) - (
+                1 if self.ai_conversation and self.ai_conversation[0]["role"] == "system" else 0
+            )
+            self.last_summarized_index = max(0, min(idx, rest_len))
             try:
                 self.last_ai_sent_id = int(data.get("last_ai_sent_id", 0))
             except (TypeError, ValueError):
@@ -500,7 +526,41 @@ class DiceSession:
         pas touche. Utile si la conversation devient tres longue ou part
         dans une mauvaise direction."""
         self.ai_conversation = []
+        self.story_summary = ""
+        self.last_summarized_index = 0
         self.last_ai_sent_id = 0
+        self.save()
+
+    def _rest_conversation(self):
+        """self.ai_conversation sans le message "system" initial (s'il
+        existe) -- c'est sur cette liste que portent la fenetre recente
+        et le resume long terme."""
+        if self.ai_conversation and self.ai_conversation[0]["role"] == "system":
+            return self.ai_conversation[1:]
+        return self.ai_conversation
+
+    def summary_cutoff(self):
+        """Index (dans _rest_conversation()) a partir duquel les messages
+        sont encore dans la fenetre recente envoyee telle quelle a l'IA.
+        Tout ce qui precede cet index est candidat au resume."""
+        return max(0, len(self._rest_conversation()) - AI_HISTORY_WINDOW)
+
+    def pending_summary_messages(self):
+        """Messages qui viennent de sortir de la fenetre recente et n'ont
+        pas encore ete integres a self.story_summary. Vide si rien de
+        nouveau a resumer (partie courte, ou resume deja a jour)."""
+        cutoff = self.summary_cutoff()
+        if cutoff <= self.last_summarized_index:
+            return []
+        return self._rest_conversation()[self.last_summarized_index:cutoff]
+
+    def apply_story_summary(self, new_summary):
+        """Enregistre le resume mis a jour (fusion ancien+nouveau, deja
+        faite par l'appelant) et avance le curseur jusqu'a la fenetre
+        recente actuelle : tout ce qui etait en attente est desormais
+        considere integre au resume."""
+        self.story_summary = (new_summary or "").strip()
+        self.last_summarized_index = self.summary_cutoff()
         self.save()
 
     def mark_last_roll_as_sent(self):
@@ -523,19 +583,31 @@ class DiceSession:
 
     def ai_messages_to_send(self):
         """Messages a effectivement transmettre a l'API : le message
-        systeme (mecaniques du jeu, toujours conserve) + une fenetre
-        recente de l'echange, pour rester sous la limite de contexte du
-        modele. L'integralite de la conversation reste conservee dans
+        systeme (mecaniques du jeu, toujours conserve) + un resume compact
+        de ce qui est sorti de la fenetre recente (si disponible, voir
+        story_summary/pending_summary_messages) + une fenetre recente de
+        l'echange, pour rester sous la limite de contexte du modele.
+        L'integralite de la conversation reste conservee dans
         self.ai_conversation (et dans la sauvegarde) pour l'affichage."""
         if not self.ai_conversation:
             return []
         if self.ai_conversation[0]["role"] == "system":
             head = [self.ai_conversation[0]]
-            rest = self.ai_conversation[1:]
         else:
             head = []
-            rest = self.ai_conversation
-        return head + rest[-AI_HISTORY_WINDOW:]
+        window = self._rest_conversation()[-AI_HISTORY_WINDOW:]
+        if self.story_summary:
+            summary_msg = {
+                "role": "system",
+                "content": (
+                    "Resume de l'histoire avant les echanges recents "
+                    "ci-dessous (personnages, objets/totems, lieux, quetes, "
+                    "evenements marquants a ne pas oublier) :\n"
+                    + self.story_summary
+                ),
+            }
+            return head + [summary_msg] + window
+        return head + window
 
     def _resolve_pip_choice(self, value):
         """Determine le symbole utilise pour chaque pip d'une face, selon

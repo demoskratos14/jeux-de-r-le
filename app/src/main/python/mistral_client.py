@@ -25,7 +25,11 @@ DEFAULT_MODEL = "mistral-small-2603"     # nom precis (plutot qu'un alias "-late
                                           # pour garder un cout/comportement stable
                                           # et previsible dans le temps
 DEFAULT_TIMEOUT = 40                     # secondes
-DEFAULT_MAX_TOKENS = 700
+DEFAULT_MAX_TOKENS = 1400                # cf. dice_web.py : 700 coupait trop
+                                          # souvent la narration en plein milieu
+                                          # de phrase des que la reponse etait un
+                                          # peu developpee (le francais consomme
+                                          # plus de tokens/mot que l'anglais).
 
 # Modeles proposes dans le menu deroulant de dice_web.py (page de config
 # de la cle API). Chaque entree est (identifiant_exact_pour_l_API, label
@@ -43,9 +47,22 @@ MODEL_CHOICES = [
 
 
 def chat(api_key, messages, model=DEFAULT_MODEL,
-         max_tokens=DEFAULT_MAX_TOKENS, timeout=DEFAULT_TIMEOUT):
+         max_tokens=DEFAULT_MAX_TOKENS, timeout=DEFAULT_TIMEOUT,
+         prompt_cache_key=None):
     """Envoie une conversation (liste de {"role": "system"/"user"/"assistant",
     "content": str}) a l'API Mistral.
+
+    prompt_cache_key (optionnel) : identifiant stable (ex: le slug de
+    l'histoire en cours) a fournir pour beneficier du "prompt caching"
+    cote Mistral -- quand deux appels consecutifs partagent le meme
+    debut de prompt (ici : le message systeme + le resume long terme,
+    qui ne changent pas d'un tour a l'autre tant que le resume n'est
+    pas mis a jour), les tokens de ce prefixe sont factures a 10% du
+    tarif normal au lieu du plein tarif. Reduit le cout sans rien
+    changer au contenu envoye ni au comportement de l'API (qui reste
+    sans etat : chaque appel doit toujours contenir tout le contexte
+    voulu, la cle ne fait qu'accelerer/reduire le cout du calcul cote
+    serveur quand le debut du prompt est identique a un appel recent).
 
     Renvoie toujours un tuple (texte, erreur) et ne leve jamais
     d'exception : toute erreur reseau, HTTP ou de format est convertie
@@ -65,6 +82,8 @@ def chat(api_key, messages, model=DEFAULT_MODEL,
         "temperature": 0.9,
         "max_tokens": max_tokens,
     }
+    if prompt_cache_key:
+        payload["prompt_cache_key"] = prompt_cache_key
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         API_URL,

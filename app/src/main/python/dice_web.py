@@ -83,6 +83,19 @@ APP_CONFIG_FILE = "app_config.json"
 CLASSIC_DICE_STATE_FILE = "classic_dice_state.json"
 CLASSIC_DICE_MAX_HISTORY = 30  # au-dela, les lancers les plus anciens sont oublies
 
+# Memoire longue de la narration automatique (voir maybe_update_story_summary
+# plus bas et DiceSession.story_summary dans dice_engine.py) : au-dela de ce
+# nombre de messages en attente de resume, on declenche un appel dedie qui
+# condense les echanges sortis de la fenetre recente (AI_HISTORY_WINDOW,
+# dans dice_engine.py) en quelques phrases, pour que l'IA garde le fil sur
+# une tres longue partie sans renvoyer tout le texte brut a chaque requete.
+STORY_SUMMARY_TRIGGER = 6
+# Modele volontairement economique et independant de celui choisi pour la
+# narration : resumer est une tache plus simple, pas besoin du modele le
+# plus cher pour ca.
+STORY_SUMMARY_MODEL = "ministral-8b-2512"
+STORY_SUMMARY_MAX_TOKENS = 400
+
 
 def load_classic_dice_state():
     if os.path.exists(CLASSIC_DICE_STATE_FILE):
@@ -396,7 +409,7 @@ BASE_CSS = """
   .ai-feed-window{
     background:#fff; color:var(--ink); border:3px solid var(--ink); border-radius:10px;
     padding:10px 12px; box-shadow:3px 3px 0 var(--ink);
-    max-height:12em; overflow-y:auto; line-height:1.5em;
+    max-height:28em; overflow-y:auto; line-height:1.5em;
   }
   .ai-feed-entry{
     text-align:left; font-weight:600; padding:6px 0;
@@ -1449,6 +1462,60 @@ def ai_event_text(record):
     return "\n".join(parts)
 
 
+def _format_messages_for_summary(messages):
+    """Met en forme des messages user/assistant en texte simple, pour le
+    prompt envoye a l'appel de resume (voir maybe_update_story_summary)."""
+    lines = []
+    for m in messages:
+        role = "Joueur" if m["role"] == "user" else "Narrateur"
+        lines.append(f"{role} : {m['content']}")
+    return "\n".join(lines)
+
+
+def maybe_update_story_summary():
+    """Si assez d'echanges sont sortis de la fenetre recente envoyee a
+    l'IA (voir DiceSession.pending_summary_messages), les condense dans
+    session.story_summary via un petit appel Mistral dedie, pour que
+    l'histoire reste coherente sur le tres long terme sans faire grossir
+    chaque requete. N'est appelee qu'apres un tour reussi de narration
+    automatique -- jamais bloquante : toute erreur est simplement ignoree,
+    le resume sera retente au prochain tour."""
+    pending = session.pending_summary_messages()
+    if len(pending) < STORY_SUMMARY_TRIGGER:
+        return
+    if not has_mistral_key():
+        return
+
+    existing = session.story_summary
+    block = _format_messages_for_summary(pending)
+    summarizer_system = (
+        "Tu condenses une histoire de jeu de role pour enfant (en francais) "
+        "en une liste tres compacte des faits a retenir : personnages "
+        "rencontres, objets/totems obtenus, lieux visites, quetes en cours "
+        "ou terminees, evenements marquants. Style neutre et factuel, pas "
+        "de tournures narratives ni de fioritures. 150 mots maximum."
+    )
+    user_prompt = (
+        (f"Resume existant :\n{existing}\n\n" if existing else "")
+        + f"Nouveaux evenements a integrer :\n{block}\n\n"
+        + "Donne le resume complet mis a jour (fusion de l'ancien resume et "
+          "des nouveaux evenements), 150 mots maximum."
+    )
+    text, error = mistral_client.chat(
+        get_mistral_key(),
+        [
+            {"role": "system", "content": summarizer_system},
+            {"role": "user", "content": user_prompt},
+        ],
+        model=STORY_SUMMARY_MODEL,
+        max_tokens=STORY_SUMMARY_MAX_TOKENS,
+        prompt_cache_key=(f"{CURRENT_STORY}-summary" if CURRENT_STORY else None),
+    )
+    if error or not text:
+        return  # tant pis pour cette fois -- retente au prochain tour
+    session.apply_story_summary(text)
+
+
 def run_ai_narrator(event_text):
     """Envoie un evenement de jeu a l'IA narratrice si une cle Mistral est
     configuree, et enregistre l'echange dans la conversation (persistee
@@ -1465,11 +1532,15 @@ def run_ai_narrator(event_text):
     if not session.ai_conversation:
         session.add_ai_message("system", build_mechanics_context(auto_mode=True))
     session.add_ai_message("user", event_text)
-    text, error = mistral_client.chat(get_mistral_key(), session.ai_messages_to_send(),
-                                       model=get_mistral_model())
+    text, error = mistral_client.chat(
+        get_mistral_key(), session.ai_messages_to_send(),
+        model=get_mistral_model(),
+        prompt_cache_key=CURRENT_STORY or None,
+    )
     if error:
         return None, error
     session.add_ai_message("assistant", text)
+    maybe_update_story_summary()
     return text, None
 
 
@@ -1497,24 +1568,28 @@ def render_ai_panel_html(transient_error=None):
             '</div>'
         )
 
-    rows = []
-    for msg in session.ai_conversation:
+    # On n'affiche desormais que la DERNIERE reponse de l'IA : les
+    # precedentes s'accumulaient dans la fenetre (ai-feed-window, hauteur
+    # limitee avec defilement) et devenaient vite illisibles au fil des
+    # tours. L'historique complet reste conserve tel quel dans
+    # session.ai_conversation (sauvegarde + contexte envoye a l'IA,
+    # cf. ai_messages_to_send()) -- seul l'affichage change.
+    last_assistant = None
+    for msg in reversed(session.ai_conversation):
         if msg["role"] == "assistant":
-            rows.append(
-                '<div class="ai-feed-entry">'
-                f'{msg["content"].replace(chr(10), "<br>")}</div>'
-            )
-        # Les messages "user" (tes propres messages/evenements envoyes a
-        # l'IA) ne sont plus affiches dans le flux -- tu les connais deja
-        # puisque c'est toi qui les as ecrits/declenches, et les melanger
-        # avec la reponse rendait la lecture confuse. Ils restent bien
-        # sur envoyes a l'IA (session.ai_conversation les garde tous)
-        # pour qu'elle garde le contexte complet de la conversation.
-    feed = "".join(rows) if rows else (
-        '<p class="ai-feed-hint">(rien pour l\'instant -- lance un de, utilise le bouton '
-        '"Envoyer le prompt a l\'IA" plus bas, ou ecris un message ci-dessous '
-        'pour planter le decor et demarrer l\'aventure)</p>'
-    )
+            last_assistant = msg
+            break
+    if last_assistant:
+        feed = (
+            '<div class="ai-feed-entry">'
+            f'{last_assistant["content"].replace(chr(10), "<br>")}</div>'
+        )
+    else:
+        feed = (
+            '<p class="ai-feed-hint">(rien pour l\'instant -- lance un de, utilise le bouton '
+            '"Envoyer le prompt a l\'IA" plus bas, ou ecris un message ci-dessous '
+            'pour planter le decor et demarrer l\'aventure)</p>'
+        )
     error_html = (
         f'<div class="sub" style="color:var(--red); margin-bottom:8px;">'
         f'&#9888;&#65039; {transient_error}</div>'

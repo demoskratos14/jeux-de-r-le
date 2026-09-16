@@ -640,6 +640,25 @@ PIP_SIZE_BY_COUNT = {
 }
 
 
+def _default_die_placeholder_html():
+    """Contenu (sans le div.die-box englobant) affiche sur le de de
+    reussite avant le tout premier lancer d'une partie (value=None), et
+    la valeur --pip-size a appliquer sur le die-box englobant (None si
+    non pertinent, cas de l'embleme generique).
+
+    Affiche l'image/emoji du totem de depart de l'histoire active
+    (default_pip_symbol) plutot que l'embleme generique de l'application,
+    pour que l'ecran de jeu soit immediatement coherent avec le premier
+    totem de l'histoire choisie. Si l'histoire ne definit pas de
+    default_pip_symbol, on retombe sur l'embleme generique (EMBLEM_SVG)."""
+    default_symbol = (CURRENT_STORY_CONFIG or {}).get("default_pip_symbol")
+    if default_symbol:
+        size = PIP_SIZE_BY_COUNT.get(1, "5.0rem")
+        cell = f'<div class="pip pip-single">{render_pip_symbol(default_symbol)}</div>'
+        return cell, size
+    return f'<div class="emblem-placeholder">{EMBLEM_SVG}</div>', None
+
+
 def render_success_die(value, pip_choice, used=True):
     """pip_choice : liste des symboles a utiliser, un par pip (meme taille
     que le nombre de pips de la valeur). Permet le mode fixe (meme symbole
@@ -647,8 +666,10 @@ def render_success_die(value, pip_choice, used=True):
     mixe (un symbole different par pip)."""
     used_cls = "" if used else " die-dimmed"
     if value is None:
-        return (f'<div class="die-box{used_cls}" id="success-die-box">'
-                f'<div class="emblem-placeholder">{EMBLEM_SVG}</div></div>')
+        placeholder, size = _default_die_placeholder_html()
+        style_attr = f' style="--pip-size:{size};"' if size else ""
+        return (f'<div class="die-box{used_cls}" id="success-die-box"{style_attr}>'
+                f'{placeholder}</div>')
     pips = PIP_POSITIONS[value]
     size = PIP_SIZE_BY_COUNT.get(value, "1.6rem")
     if value == 1:
@@ -667,8 +688,11 @@ def render_success_die(value, pip_choice, used=True):
 def render_fate_die(key, used=True):
     used_cls = "" if used else " die-dimmed"
     if key is None:
+        # Meme emoji "boule de cristal" que sur le bouton "Lancer" du de
+        # du destin (&#128302; = 🔮), plutot que l'embleme generique
+        # (patte animale) qui n'a rien a voir avec ce de.
         return (f'<div class="die-box fate{used_cls}" id="fate-die-box">'
-                f'<div class="emblem-placeholder">{EMBLEM_SVG}</div></div>')
+                f'<div class="fate-emoji">&#128302;</div></div>')
     face = FATE_BY_KEY[key]
     return (f'<div class="die-box fate{used_cls}" id="fate-die-box"><div class="fate-emoji">{face["emoji"]}</div>'
             f'<div class="fate-label">{face["label"]}</div></div>')

@@ -1,0 +1,61 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Installer le JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Chaquopy a besoin d'un Python 3.11 present sur la machine qui
+      # compile, uniquement pour telecharger les paquets Python (ici
+      # "flask") pendant le build -- ce n'est PAS le Python qui tourne
+      # ensuite sur le telephone (celui-la, Chaquopy l'embarque lui-meme
+      # dans l'APK). Sans cette etape : "Couldn't find Python 3.11".
+      - name: Installer Python 3.11 (pour Chaquopy, pas pour l'appli)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Préparer le SDK Android
+        uses: android-actions/setup-android@v3
+        with:
+          # Par defaut, cette action essaie aussi d'installer le paquet
+          # "tools" (l'ancien outillage Android historique), que Google a
+          # retire de son depot -- ce qui fait echouer l'etape avec
+          # "Failed to find package 'tools'". On ne demande donc que
+          # platform-tools, seul reellement necessaire ici (le reste,
+          # build-tools/platforms, est telecharge automatiquement par
+          # Gradle/AGP au moment de la compilation).
+          packages: "platform-tools"
+
+      - name: Préparer Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      # On appelle "gradle" directement (et non "./gradlew") pour ne pas
+      # dépendre du binaire gradle-wrapper.jar dans le dépôt.
+      - name: Construire l'APK (debug)
+        run: gradle assembleDebug --stacktrace
+
+      - name: Publier l'APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: jeux-de-role-apk
+          path: app/build/outputs/apk/debug/jeux-de-role-debug.apk
+          if-no-files-found: error

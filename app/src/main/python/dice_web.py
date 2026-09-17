@@ -89,12 +89,28 @@ CLASSIC_DICE_MAX_HISTORY = 30  # au-dela, les lancers les plus anciens sont oubl
 # condense les echanges sortis de la fenetre recente (AI_HISTORY_WINDOW,
 # dans dice_engine.py) en quelques phrases, pour que l'IA garde le fil sur
 # une tres longue partie sans renvoyer tout le texte brut a chaque requete.
+#
+# Ce declenchement produit en realite DEUX resumes distincts du meme lot de
+# messages (voir maybe_update_story_summary) :
+#   1. un resume chapitre, plus long et detaille, qui devient la seule
+#      entree ajoutee au journal de l'histoire (session.story_log) pour ce
+#      lot de messages -- il n'est JAMAIS recompacte par la suite : le
+#      journal grandit donc chapitre apres chapitre en gardant toujours
+#      autant de details ;
+#   2. le resume compact ci-dessous (story_summary), lui fusionne a chaque
+#      fois avec l'ancien et recompacte a une taille quasi constante -- il
+#      perd donc du detail au fil d'une tres longue partie, mais c'est sans
+#      consequence puisque le detail complet reste disponible dans le
+#      journal (1.).
 STORY_SUMMARY_TRIGGER = 6
 # Modele volontairement economique et independant de celui choisi pour la
 # narration : resumer est une tache plus simple, pas besoin du modele le
 # plus cher pour ca.
 STORY_SUMMARY_MODEL = "ministral-8b-2512"
 STORY_SUMMARY_MAX_TOKENS = 400
+# Le resume chapitre (voir 1. ci-dessus) doit rester detaille -- on lui
+# laisse donc davantage de place qu'au resume compact.
+STORY_CHAPTER_SUMMARY_MAX_TOKENS = 700
 
 
 def load_classic_dice_state():
@@ -1133,6 +1149,10 @@ def roll_animation_script():
         }});
     }}
     function refreshAiPanel(url, params){{
+      // On coupe toute lecture a voix haute en cours : le panneau qui va
+      // etre remplace (nouvelle reponse de l'IA) rendrait la voix actuelle
+      // obsolete/en decalage avec le texte affiche.
+      if (window.speechSynthesis) {{ window.speechSynthesis.cancel(); }}
       fetch(url, {{
         method: 'POST',
         headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
@@ -1143,6 +1163,24 @@ def roll_animation_script():
           var panel = document.getElementById('aiStoryPanel');
           if (panel) {{ panel.outerHTML = html; }}
         }});
+    }}
+    function speakAiFeed(){{
+      if (!window.speechSynthesis) {{ return; }}
+      var btn = document.getElementById('aiSpeakBtn');
+      if (window.speechSynthesis.speaking) {{
+        window.speechSynthesis.cancel();
+        if (btn) {{ btn.innerHTML = '\U0001f50a Ecouter'; }}
+        return;
+      }}
+      var box = document.getElementById('aiFeedRawText');
+      var text = box ? box.value : '';
+      if (!text) {{ return; }}
+      var utter = new SpeechSynthesisUtterance(text);
+      utter.lang = 'fr-FR';
+      utter.onend = function(){{ if (btn) {{ btn.innerHTML = '\U0001f50a Ecouter'; }} }};
+      utter.onerror = function(){{ if (btn) {{ btn.innerHTML = '\U0001f50a Ecouter'; }} }};
+      if (btn) {{ btn.innerHTML = '\u23f9 Arreter'; }}
+      window.speechSynthesis.speak(utter);
     }}
     function clearMistralKey(){{
       if (!confirm("Retirer la cle et revenir au mode manuel (bouton copier) ?")) {{ return; }}
@@ -1472,22 +1510,78 @@ def _format_messages_for_summary(messages):
     return "\n".join(lines)
 
 
+def _build_chapter_summary(block):
+    """Redige le resume chapitre detaille (voir STORY_SUMMARY_TRIGGER plus
+    haut) a partir d'un lot de messages deja mis en forme par
+    _format_messages_for_summary. Ce texte est destine a etre injecte tel
+    quel dans le journal de l'histoire -- contrairement au resume compact
+    de maybe_update_story_summary, il n'est jamais recompacte par la suite,
+    donc on privilegie ici un style narratif complet qui garde le detail
+    (dialogues marquants, emotions, decouvertes) plutot qu'une liste seche
+    de faits. Renvoie (texte_ou_None, erreur_ou_None)."""
+    chapter_system = (
+        "Tu rediges un chapitre de journal d'aventure pour un jeu de role "
+        "enfant (en francais), a partir d'un extrait de partie (echanges "
+        "joueur/narrateur). Raconte les evenements de cet extrait de facon "
+        "claire et fluide, comme un vrai chapitre d'histoire, en gardant "
+        "tous les details importants : personnages rencontres, objets ou "
+        "totems obtenus, lieux visites, dialogues marquants, rebondissements "
+        "et emotions. Ce texte est archive definitivement dans le journal "
+        "de l'histoire : il doit donc rester complet et agreable a relire, "
+        "pas une simple liste de faits. Environ 250 a 350 mots."
+    )
+    user_prompt = f"Extrait de la partie a raconter sous forme de chapitre :\n{block}"
+    return mistral_client.chat(
+        get_mistral_key(),
+        [
+            {"role": "system", "content": chapter_system},
+            {"role": "user", "content": user_prompt},
+        ],
+        model=STORY_SUMMARY_MODEL,
+        max_tokens=STORY_CHAPTER_SUMMARY_MAX_TOKENS,
+        prompt_cache_key=(f"{CURRENT_STORY}-chapter" if CURRENT_STORY else None),
+    )
+
+
 def maybe_update_story_summary():
     """Si assez d'echanges sont sortis de la fenetre recente envoyee a
-    l'IA (voir DiceSession.pending_summary_messages), les condense dans
-    session.story_summary via un petit appel Mistral dedie, pour que
-    l'histoire reste coherente sur le tres long terme sans faire grossir
-    chaque requete. N'est appelee qu'apres un tour reussi de narration
-    automatique -- jamais bloquante : toute erreur est simplement ignoree,
-    le resume sera retente au prochain tour."""
+    l'IA (voir DiceSession.pending_summary_messages), condense ce lot de
+    messages en DEUX resumes distincts, pour que l'histoire reste coherente
+    sur le tres long terme sans faire grossir chaque requete :
+
+    1. un resume chapitre detaille (voir _build_chapter_summary), qui
+       devient la nouvelle entree du journal de l'histoire
+       (session.story_log) pour ce lot -- jamais recompacte ensuite, donc
+       le journal grandit chapitre apres chapitre en gardant tout son
+       detail ;
+    2. le resume compact habituel (session.story_summary), fusionne avec
+       l'ancien et renvoye a l'IA a chaque requete -- lui reste borne a
+       une taille quasi constante et perd donc du detail au fil d'une tres
+       longue partie (sans consequence : ce detail reste disponible dans
+       le journal via 1.).
+
+    N'est appelee qu'apres un tour reussi de narration automatique --
+    jamais bloquante : toute erreur sur l'un ou l'autre des deux appels est
+    simplement ignoree, le resume concerne sera retente au prochain tour."""
     pending = session.pending_summary_messages()
     if len(pending) < STORY_SUMMARY_TRIGGER:
         return
     if not has_mistral_key():
         return
 
-    existing = session.story_summary
     block = _format_messages_for_summary(pending)
+
+    # 1. Resume chapitre -> journal de l'histoire (voir docstring).
+    chapter_text, chapter_error = _build_chapter_summary(block)
+    if chapter_text and not chapter_error:
+        session.add_story_entry(chapter_text)
+    # En cas d'erreur ici, on ne bloque pas le resume compact ci-dessous :
+    # ce lot de messages restera "en attente" et le chapitre sera retente
+    # au prochain tour (voir apply_story_summary, qui avance le curseur
+    # commun aux deux resumes une fois le resume compact applique).
+
+    # 2. Resume compact -> renvoye a l'IA a chaque requete (voir docstring).
+    existing = session.story_summary
     summarizer_system = (
         "Tu condenses une histoire de jeu de role pour enfant (en francais) "
         "en une liste tres compacte des faits a retenir : personnages "
@@ -1540,6 +1634,13 @@ def run_ai_narrator(event_text):
     if error:
         return None, error
     session.add_ai_message("assistant", text)
+    # Le journal de l'histoire (story_log/story_log_text plus bas) n'est
+    # plus rempli tour par tour avec le texte brut de chaque reponse : il
+    # ne recoit desormais que le resume chapitre genere tous les
+    # STORY_SUMMARY_TRIGGER messages (voir maybe_update_story_summary /
+    # _build_chapter_summary), qui condense plusieurs tours a la fois tout
+    # en gardant le detail. La case "coller ici le resume de chapitre"
+    # reste neanmoins disponible pour le mode manuel (sans cle API).
     maybe_update_story_summary()
     return text, None
 
@@ -1584,12 +1685,24 @@ def render_ai_panel_html(transient_error=None):
             '<div class="ai-feed-entry">'
             f'{last_assistant["content"].replace(chr(10), "<br>")}</div>'
         )
+        # Case cachee (textarea, comme les autres "copybox" de l'appli) qui
+        # garde le texte BRUT (sans le <br> ajoute pour l'affichage) du
+        # dernier message -- lue par speakAiFeed() pour la lecture a voix
+        # haute (API navigateur SpeechSynthesis, fonctionne nativement dans
+        # la WebView, aucun appel reseau ni dependance supplementaire).
+        speak_html = (
+            f'<textarea id="aiFeedRawText" style="display:none;">'
+            f'{last_assistant["content"]}</textarea>'
+            '<button type="button" class="small secondary" id="aiSpeakBtn" '
+            'onclick="speakAiFeed()">&#128266; Ecouter</button>'
+        )
     else:
         feed = (
             '<p class="ai-feed-hint">(rien pour l\'instant -- lance un de, utilise le bouton '
             '"Envoyer le prompt a l\'IA" plus bas, ou ecris un message ci-dessous '
             'pour planter le decor et demarrer l\'aventure)</p>'
         )
+        speak_html = ""
     error_html = (
         f'<div class="sub" style="color:var(--red); margin-bottom:8px;">'
         f'&#9888;&#65039; {transient_error}</div>'
@@ -1610,6 +1723,7 @@ def render_ai_panel_html(transient_error=None):
         '&#9989; Narration automatique active (Mistral)</div>'
         + error_html
         + f'<div id="aiStoryFeed" class="ai-feed-window">{feed}</div>'
+        + speak_html
         + pending_html
         + '<label style="margin-top:12px;">Message libre a l\'IA (demarrer l\'aventure, '
         + 'decrire une action de Gabin...)</label>'
@@ -2873,9 +2987,15 @@ def index():
     <div class="card">
       <h2 style="margin-top:0">Dernier lancer</h2>
       {render_history_list_html()}
-      <label style="margin-top:14px;">Coller ici le resume de chapitre recu de l'IA narratrice</label>
-      <textarea id="storyEntryInput" placeholder="Colle ici le bloc recu a la fin d'un chapitre"></textarea>
-      <button type="button" onclick="addStoryEntry()">&#128218; Ajouter au journal de l'histoire</button>
+      {(
+        '<p class="hint" style="margin-top:14px;">Le journal se remplit '
+        'automatiquement, chapitre par chapitre, au fil de la narration '
+        'automatique (voir plus haut).</p>'
+      ) if has_mistral_key() else (
+        '<label style="margin-top:14px;">Coller ici le resume de chapitre recu de l\'IA narratrice</label>'
+        '<textarea id="storyEntryInput" placeholder="Colle ici le bloc recu a la fin d\'un chapitre"></textarea>'
+        '<button type="button" onclick="addStoryEntry()">&#128218; Ajouter au journal de l\'histoire</button>'
+      )}
       <a class="btn secondary" href="{url_for('show_story')}">Voir le journal complet</a>
       <div style="margin-top:16px;">
         <button type="button" class="secondary" onclick="doUndo()">

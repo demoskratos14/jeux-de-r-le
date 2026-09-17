@@ -80,6 +80,42 @@ FATE_FACES = [
 ]
 FATE_BY_KEY = {f["key"]: f for f in FATE_FACES}
 
+# Interactions narratives entre les deux des, utilisees uniquement quand ils
+# sont lances ENSEMBLE (roll_both -- meme instant, meme scene) et seulement
+# pour les valeurs extremes du de de reussite (1 : echec critique, 6 :
+# reussite exceptionnelle), la ou une vraie coincidence dramatique a du
+# sens. Pour les valeurs intermediaires (2 a 5), les deux des restent
+# traites independamment comme avant (aucune entree ici).
+COMBO_NOTES = {
+    (1, "coeur"): ("Malgre l'echec, un allie providentiel intervient juste "
+                   "a temps pour eviter le pire."),
+    (1, "question"): ("L'echec ouvre malgre tout une piste inattendue a "
+                       "explorer plus tard."),
+    (1, "soleil"): ("Malgre l'echec, une lueur d'espoir apparait : quelque "
+                     "chose de positif se prepare deja."),
+    (1, "etoile"): ("L'echec cache une chance inattendue, presque "
+                     "miraculeuse, qui va bientot se reveler."),
+    (1, "exclamation"): ("Au moment le plus difficile, une aide inattendue "
+                          "arrive a la rescousse."),
+    (1, "spirale"): ("L'echec declenche un veritable tournant : la "
+                      "situation bascule de facon totalement inattendue -- "
+                      "un moment charniere de l'histoire."),
+    (6, "coeur"): ("La reussite s'accompagne d'un moment de grace : un "
+                    "lien se renforce ou un petit miracle se produit."),
+    (6, "question"): ("Ce moment heroique ouvre une toute nouvelle piste a "
+                       "explorer."),
+    (6, "soleil"): ("La reussite est amplifiee : un bienfait durable en "
+                     "decoule."),
+    (6, "etoile"): ("Un coup de chance exceptionnel vient couronner cette "
+                     "reussite deja heroique."),
+    (6, "exclamation"): ("En plus de cette reussite, un allie inattendu "
+                          "vient preter main forte, rendant le moment "
+                          "encore plus marquant."),
+    (6, "spirale"): ("Cette reussite heroique s'accompagne d'une "
+                      "transformation inattendue : quelque chose change "
+                      "durablement dans l'histoire."),
+}
+
 
 class DiceSession:
     def __init__(self):
@@ -742,6 +778,10 @@ class DiceSession:
             kind = record["side_quest"]["kind"]
             kind_txt = "se faire un nouvel ami" if kind == "ami" else "trouver un nouvel objet (ou totem)"
             parts.append(f"\U0001f4dc Nouvelle quete secondaire disponible : {kind_txt}.")
+        if record["type"] == "both":
+            combo = COMBO_NOTES.get((record["success"], record["fate"]))
+            if combo:
+                parts.append(f"\u2728 Coincidence marquante : {combo}")
         return "\n".join(parts)
 
     def history_text(self):
